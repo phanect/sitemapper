@@ -41,8 +41,9 @@ export default class Sitemapper {
    * @example sitemapper.fetch('example.xml')
    *  .then((sites) => console.log(sites));
    */
-  fetch(url = this.url) {
-    return new Promise(resolve => this.crawl(url).then(sites => resolve({ url, sites })));
+  async fetch(url = this.url) {
+    const sites = await this.crawl(url);
+    return { url, sites };
   }
 
   /**
@@ -91,7 +92,7 @@ export default class Sitemapper {
    * @param {string} [url] - the Sitemaps url (e.g http://wp.seantburke.com/sitemap.xml)
    * @returns {Promise<ParseData>}
    */
-  parse(url = this.url) {
+  async parse(url = this.url) {
     const requestOptions = {
       method: 'GET',
       uri: url,
@@ -99,20 +100,17 @@ export default class Sitemapper {
       gzip: true,
     };
 
-    return new Promise((resolve) => {
-      const requester = request(requestOptions)
-        .then((response) => {
-          if (!response || response.statusCode !== 200) {
-            clearTimeout(this.timeoutTable[url]);
-            return resolve({ error: response.error, data: response });
-          }
-          return xmlParse(response.body);
-        })
-        .then(data => resolve({ error: null, data }))
-        .catch(response => resolve({ error: response.error, data: {} }));
-
-      this.initializeTimeout(url, requester, resolve);
-    });
+    try {
+      const response = await request(requestOptions);
+      if (!response || response.statusCode !== 200) {
+        clearTimeout(this.timeoutTable[url]);
+        return this.initializeTimeout(url, { error: response.error, data: response });
+      }
+      const data = await xmlParse(response.body);
+      return this.initializeTimeout(url, { error: null, data });
+    } catch (response) {
+      return this.initializeTimeout(url, { error: response.error, data: {} });
+    }
   }
 
   /**
@@ -122,18 +120,19 @@ export default class Sitemapper {
    * @private
    * @param {string} url - url to use as a hash in the timeoutTable
    * @param {Promise} requester - the promise that creates the web request to the url
-   * @param {Function} callback - the resolve method is used here to resolve the parent promise
    */
-  initializeTimeout(url, requester, callback) {
-    // this resolves instead of rejects in order to allow other requests to continue
-    this.timeoutTable[url] = setTimeout(() => {
-      requester.cancel();
+  async initializeTimeout(url, requester) {
+    return Promise(resolve => {
+      // this resolves instead of rejects in order to allow other requests to continue
+      this.timeoutTable[url] = setTimeout(() => {
+        requester.cancel();
 
-      callback({
-        error: `request timed out after ${this.timeout} milliseconds`,
-        data: {},
-      });
-    }, this.timeout);
+        resolve({
+          error: `request timed out after ${this.timeout} milliseconds`,
+          data: {},
+        });
+      }, this.timeout);
+    })
   }
 
   /**
@@ -144,36 +143,32 @@ export default class Sitemapper {
    * @param {string} url - the Sitemaps url (e.g http://wp.seantburke.com/sitemap.xml)
    * @returns {Promise<SitesArray> | Promise<ParseData>}
    */
-  crawl(url) {
-    return new Promise((resolve) => {
-      this.parse(url).then(({ error, data }) => {
-        // The promise resolved, remove the timeout
-        clearTimeout(this.timeoutTable[url]);
+  async crawl(url) {
+    const { error, data } = await this.parse(url);
+    // The promise resolved, remove the timeout
+    clearTimeout(this.timeoutTable[url]);
 
-        if (error) {
-          // Fail silently
-          return resolve([]);
-        } else if (data && data.urlset && data.urlset.url) {
-          const sites = data.urlset.url.map(site => site.loc && site.loc[0]);
+    if (error) {
+      // Fail silently
+      return [];
+    } else if (data && data.urlset && data.urlset.url) {
+      const sites = data.urlset.url.map(site => site.loc && site.loc[0]);
 
-          return resolve([].concat(sites));
-        } else if (data && data.sitemapindex) {
-          // Map each child url into a promise to create an array of promises
-          const sitemap = data.sitemapindex.sitemap.map(map => map.loc && map.loc[0]);
-          const promiseArray = sitemap.map(site => this.crawl(site));
+      return [].concat(sites);
+    } else if (data && data.sitemapindex) {
+      // Map each child url into a promise to create an array of promises
+      const sitemap = data.sitemapindex.sitemap.map(map => map.loc && map.loc[0]);
+      const promiseArray = sitemap.map(site => this.crawl(site));
 
-          // Make sure all the promises resolve then filter and reduce the array
-          return Promise.all(promiseArray).then(results => {
-            const sites = results.filter(result => !result.error)
-              .reduce((prev, curr) => prev.concat(curr), []);
+      // Make sure all the promises resolve then filter and reduce the array
+      const results = await Promise.all(promiseArray);
+      const sites = results.filter(result => !result.error)
+        .reduce((prev, curr) => prev.concat(curr), []);
 
-            return resolve(sites);
-          });
-        }
-        // Fail silently
-        return resolve([]);
-      });
-    });
+      return sites;
+    }
+    // Fail silently
+    return [];
   }
 
 
